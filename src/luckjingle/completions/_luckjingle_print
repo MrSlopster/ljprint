@@ -1,0 +1,133 @@
+#compdef luckjingle-print ljprint luckjingle_print
+# zsh completion for luckjingle-print / ljprint
+#
+# Install (one of):
+#   1. cp this file to a directory on your fpath (e.g. ~/.zsh/completions/)
+#      and ensure `fpath=(~/.zsh/completions $fpath)` runs BEFORE compinit
+#   2. source this file from your ~/.zshrc (uses bashcompinit bridge)
+#   3. eval "$(uv run luckjingle-print completions --shell zsh)"
+#
+# MAC addresses are completed from the BlueZ device cache (`bluetoothctl devices`).
+
+_luckjingle_macs() {
+    local -a macs
+    macs=(${(f)"$(bluetoothctl devices 2>/dev/null | awk '/^Device/ {print $2}')"})
+    _describe 'printer MAC' macs
+}
+
+_luckjingle_print() {
+    local -a subcommands
+    subcommands=(
+        'scan:Scan for nearby LuckJingle printers'
+        'gatt-map:Dump full GATT layout'
+        'raw:Send raw hex bytes'
+        'info:Combined device snapshot'
+        'status:One-shot status query'
+        'watch:Continuous status/event monitor'
+        'print-text:Render and print text'
+        'print:Alias for print-text'
+        'print-image:Print PNG/JPG image file'
+        'print-pdf:Print PDF pages'
+        'print-qr:Generate and print QR code'
+        'print-barcode:Generate and print 1D barcode'
+        'print-grid:Print ruled/grid/lined paper'
+        'set-density:Set print density'
+        'set-speed:Set print speed'
+        'set-paper-type:Set paper type (1F 80 kind mask)'
+        'set-heating:Set heating level'
+        'set-shuttime:Set auto-shutdown timer'
+        'set-width:Set print width'
+        'set-time:Sync printer RTC to system time'
+        'reset:Send recovery/reset command'
+        'completions:Print a shell-completion script'
+    )
+
+    # Common print-subcommand options shared across print-text/print-image/etc.
+    local -a print_common
+    print_common=(
+        '--mode[print mode preset]:mode:(normal tattoo water-transfer a4)'
+        '--force[skip preflight status check]'
+    )
+
+    _arguments -C \
+        '(-h --help)'{-h,--help}'[show help]' \
+        '(-v --verbose)'{-v,--verbose}'[verbose: -v=INFO, -vv=DEBUG]' \
+        '1: :->subcommand' \
+        '*:: :->rest'
+
+    case $state in
+        subcommand)
+            _describe 'luckjingle_print subcommand' subcommands
+            ;;
+        rest)
+            local cmd=${words[1]}
+            case $cmd in
+                scan)
+                    _arguments '--duration[scan duration seconds]:seconds:'
+                    ;;
+                info|status|reset|set-time|gatt-map)
+                    # Just MAC, no flags worth completing
+                    _arguments ':mac:_luckjingle_macs'
+                    ;;
+                watch)
+                    _arguments '--interval[poll interval seconds]:seconds:' ':mac:_luckjingle_macs'
+                    ;;
+                raw)
+                    _arguments ':mac:_luckjingle_macs' ':hex bytes:'
+                    ;;
+                print-text|print)
+                    _arguments $print_common \
+                        '--font-size[text font size]:size:' \
+                        '--bold[bold font]' \
+                        '--align[text alignment]:align:(left center right)' \
+                        ':mac:_luckjingle_macs' \
+                        ':text:'
+                    ;;
+                print-image)
+                    _arguments $print_common \
+                        '--dither[dithering]:dither:(floyd threshold none)' \
+                        '--threshold[binary threshold]:threshold:' \
+                        ':mac:_luckjingle_macs' \
+                        ':image file:_files'
+                    ;;
+                print-pdf)
+                    _arguments $print_common \
+                        '--pages[page range e.g. 1,3,5-7]:range:' \
+                        '--dither[dithering]:dither:(floyd threshold none)' \
+                        '--threshold[binary threshold]:threshold:' \
+                        ':mac:_luckjingle_macs' \
+                        ':pdf file:_files'
+                    ;;
+                print-qr)
+                    _arguments $print_common \
+                        '--box-size[qr box size]:size:' \
+                        ':mac:_luckjingle_macs' \
+                        ':data to encode:'
+                    ;;
+                print-barcode)
+                    _arguments $print_common \
+                        ':barcode type:(code128 code39 code93 ean13 ean8 ean14 isbn isbn13 issn jan upc upca gs1)' \
+                        ':mac:_luckjingle_macs' \
+                        ':data to encode:'
+                    ;;
+                print-grid)
+                    _arguments $print_common \
+                        '--style[grid style]:style:(grid ruled lined)' \
+                        '--rows[grid rows]:rows:' \
+                        '--cols[grid columns]:cols:' \
+                        '--line-spacing[line spacing]:spacing:' \
+                        ':mac:_luckjingle_macs'
+                    ;;
+                set-density)    _arguments ':mac:_luckjingle_macs' ':density level (0-2):' ;;
+                set-speed)      _arguments ':mac:_luckjingle_macs' ':speed:' ;;
+                set-paper-type) _arguments ':mac:_luckjingle_macs' ':kind:' ':mask:' ;;
+                set-heating)    _arguments ':mac:_luckjingle_macs' ':heating level:' ;;
+                set-shuttime)   _arguments ':mac:_luckjingle_macs' ':minutes:' ;;
+                set-width)      _arguments ':mac:_luckjingle_macs' ':pixels:' ;;
+                completions)    _arguments '--shell[target shell]:shell:(bash zsh)' ;;
+            esac
+            ;;
+    esac
+}
+
+_luckjingle_print "$@"

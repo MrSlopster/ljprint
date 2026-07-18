@@ -1,0 +1,84 @@
+[project]
+name = "luckjingle-print"
+version = "0.3.0"
+description = "BLE CLI for LuckJingle / DingDang thermal printers (reverse-engineered protocol)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "LuckJingle CLI contributors" }]
+keywords = ["ble", "thermal-printer", "esc-pos", "luckjingle", "bluetooth"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: System :: Hardware :: Hardware Drivers",
+    "Topic :: Printing",
+]
+dependencies = [
+    "bleak>=0.21",
+    "pillow>=10.0",
+    "qrcode>=7.4",
+    "python-barcode>=0.15",
+    "pypdfium2>=4.0",
+    "numpy>=1.24",
+]
+
+[project.scripts]
+# Installs `luckjingle-print` (and short alias `ljprint`) on the PATH.
+# Equivalent invocations:
+#   luckjingle-print info AA:BB:CC:DD:EE:FF
+#   uv run luckjingle-print info AA:BB:CC:DD:EE:FF
+#   python -m luckjingle info AA:BB:CC:DD:EE:FF
+luckjingle-print = "luckjingle.cli:main"
+ljprint = "luckjingle.cli:main"
+
+# ---------------------------------------------------------------------------
+# PEP 735 dev dependency groups (uv 0.4.27+; synced by default with `uv sync`)
+# ---------------------------------------------------------------------------
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+# ---------------------------------------------------------------------------
+# hatchling build config
+# ---------------------------------------------------------------------------
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/luckjingle"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/luckjingle",
+    "tests",
+    "README.md",
+    "PROTOCOL.md",
+    "pyproject.toml",
+]
+
+# ---------------------------------------------------------------------------
+# tool configs
+# ---------------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
