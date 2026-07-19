@@ -329,6 +329,23 @@ def test_mtu_announcement_clamped_to_link_att_mtu(transport_with_credit):
     assert asyncio.run(go()) == 97
 
 
+def test_mtu_announcement_trusted_when_link_mtu_is_bluez_default(transport_with_credit):
+    """BlueZ reports the spec-minimum 23 when it never acquired the real MTU.
+    That must be treated as unknown — clamping to 20 would silently slow every
+    print job to ~12x fewer bytes per packet than the printer negotiated."""
+    transport, client = transport_with_credit
+    client.mtu_size = 23
+    transport.packet_size = 20
+    transport._mtu_ready.clear()
+
+    async def go():
+        client.simulate_notify(protocol.CREDIT_CHAR_UUID, b"\x02\xF4\x00")
+        await asyncio.sleep(0)
+        return transport.packet_size
+
+    assert asyncio.run(go()) == 244
+
+
 def test_credit_starvation_raises_actionable_error(transport_with_credit, monkeypatch):
     """A credit timeout must surface as a RuntimeError with a hint, not a
     bare TimeoutError whose str() is empty."""

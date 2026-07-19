@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import warnings
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -155,12 +156,17 @@ class PrinterTransport:
             # PROTOCOL.md §1.2 says to request ATT_MTU = 3 + mtu, but bleak
             # cannot initiate an MTU exchange — the OS negotiates on its own.
             # Clamp to the link's actual ATT_MTU so a chunk never exceeds
-            # what write-without-response can carry (ATT_MTU - 3).
+            # what write-without-response can carry (ATT_MTU - 3). BlueZ
+            # reports (with a UserWarning) the spec-minimum 23 when it never
+            # acquired the MTU; treat that as unknown and trust the printer's
+            # announcement, which is derived from the negotiated link MTU.
             try:
-                link_mtu = int(getattr(self.client, "mtu_size", 0))
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    link_mtu = int(getattr(self.client, "mtu_size", 0))
             except Exception:
                 link_mtu = 0
-            usable = min(mtu, link_mtu - 3) if link_mtu > 3 else mtu
+            usable = min(mtu, link_mtu - 3) if link_mtu > 23 else mtu
             if usable >= protocol.DEFAULT_PACKET_SIZE:
                 self.packet_size = usable
             LOGGER.debug("printer announced MTU payload=%d, link ATT_MTU=%d -> packet_size=%d",

@@ -54,9 +54,12 @@ The packet size used for chunking writes is therefore negotiated per session
 
 Client note (Linux/BlueZ): the host stack negotiates ATT_MTU on its own and
 cannot be asked to re-negotiate, so step 4's "request ATT_MTU" is not
-possible there. If the negotiated ATT_MTU is smaller than the printer's
-preferred payload, clamp the per-packet payload to `ATT_MTU - 3` instead of
-using the announced value.
+possible there. If the host reports a real negotiated ATT_MTU smaller than
+the printer's preferred payload, clamp the per-packet payload to
+`ATT_MTU - 3`. BlueZ often reports only the spec-minimum 23 (meaning "not
+acquired", not the real value); in that case trust the printer's `[0x02, lo,
+hi]` announcement — it is derived from the MTU the link actually negotiated
+(verified on `D1Y-KD`: 244-byte payloads work while BlueZ reports 23).
 
 ### 1.3 Credit-based flow control
 
