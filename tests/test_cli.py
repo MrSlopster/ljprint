@@ -165,6 +165,76 @@ def test_unknown_mode_is_rejected(capsys):
 
 
 # ---------------------------------------------------------------------------
+# print-text / print : stdin via "-"
+# ---------------------------------------------------------------------------
+
+def test_resolve_text_arg_returns_literal_when_not_dash():
+    from luckjingle.cli import _resolve_text_arg
+    assert _resolve_text_arg("hello") == "hello"
+    assert _resolve_text_arg("multi\nline\nstring") == "multi\nline\nstring"
+
+
+def test_resolve_text_arg_reads_stdin_on_dash(monkeypatch):
+    import io
+    from luckjingle.cli import _resolve_text_arg
+    monkeypatch.setattr("sys.stdin", io.StringIO("piped content\nsecond line"))
+    assert _resolve_text_arg("-") == "piped content\nsecond line"
+
+
+def test_resolve_text_arg_empty_stdin_returns_empty(monkeypatch):
+    import io
+    from luckjingle.cli import _resolve_text_arg
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    assert _resolve_text_arg("-") == ""
+
+
+def test_print_text_dash_arg_rejects_empty_stdin(monkeypatch, capsys):
+    """`print MAC -` with empty stdin should exit EXIT_BAD_ARG, not crash."""
+    import io
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    monkeypatch.setenv(protocol.DEFAULT_MAC_ENV, "AA:BB:CC:DD:EE:FF")
+
+    # Short-circuit the BLE step by patching Printer to a no-op stub.
+    import luckjingle.cli as cli_mod
+
+    class _StubPrinter:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def print_text(self, *a, **kw): return None
+    monkeypatch.setattr(cli_mod, "Printer", _StubPrinter)
+
+    rc = main(["print", "-", ])
+    assert rc == EXIT_BAD_ARG
+    err = capsys.readouterr().err
+    assert "no text to print" in err.lower()
+
+
+def test_print_text_dash_arg_passes_stdin_to_printer(monkeypatch, capsys):
+    """`echo foo | print MAC -` should reach Printer.print_text with the piped body."""
+    import io
+    monkeypatch.setattr("sys.stdin", io.StringIO("from stdin"))
+    monkeypatch.setenv(protocol.DEFAULT_MAC_ENV, "AA:BB:CC:DD:EE:FF")
+
+    captured: dict = {}
+
+    import luckjingle.cli as cli_mod
+
+    class _CapturingPrinter:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def print_text(self, text, **kw):
+            captured["text"] = text
+            return None
+    monkeypatch.setattr(cli_mod, "Printer", _CapturingPrinter)
+
+    rc = main(["print", "-"])
+    assert rc == 0
+    assert captured.get("text") == "from stdin"
+
+
+# ---------------------------------------------------------------------------
 # completions subcommand
 # ---------------------------------------------------------------------------
 

@@ -161,12 +161,31 @@ async def cmd_gatt_map(args) -> int:
 
 
 async def cmd_print_text(args) -> int:
+    text = _resolve_text_arg(args.text)
+    if not text:
+        sys.stderr.write("error: no text to print (stdin was empty)\n")
+        return EXIT_BAD_ARG
     async with Printer(args.mac) as p:
-        await p.print_text(args.text, mode=args.mode,
+        await p.print_text(text, mode=args.mode,
                            font_size=args.font_size, bold=args.bold,
                            align=args.align, force=args.force)
-    print(f"Printed text to {args.mac}.")
+    # Informational message goes to stderr so it doesn't pollute downstream
+    # pipes when the user is piping text INTO the command.
+    sys.stderr.write(f"Printed {len(text)} chars to {args.mac}.\n")
     return EXIT_OK
+
+
+def _resolve_text_arg(text: str) -> str:
+    """If `text` is the conventional `-` sentinel, slurp stdin instead.
+    Supports `fortune | luckjingle-print print -` and heredocs:
+        luckjingle-print print - <<EOF
+        multi
+        line
+        EOF
+    """
+    if text != "-":
+        return text
+    return sys.stdin.read()
 
 
 async def cmd_print_image(args) -> int:
@@ -311,9 +330,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(handler=cmd_watch)
 
     # ---- print ----
+    _text_help = ('Text to print, or "-" to read from stdin '
+                  '(e.g. `fortune | luckjingle-print print -`)')
     s = sub.add_parser("print-text", help="Render text and print it.")
     _mac_arg(s)
-    s.add_argument("text", help="Text (use quotes; \\n in shell for new lines)")
+    s.add_argument("text", help=_text_help)
     s.add_argument("--font-size", type=int, default=32)
     s.add_argument("--bold", action="store_true")
     s.add_argument("--align", choices=["left", "center", "right"], default="left")
@@ -323,7 +344,7 @@ def build_parser() -> argparse.ArgumentParser:
     # Backward-compat alias: `print` was the original name (single-file demo).
     s = sub.add_parser("print", help="Alias for print-text.")
     _mac_arg(s)
-    s.add_argument("text")
+    s.add_argument("text", help=_text_help)
     s.add_argument("--font-size", type=int, default=32)
     s.add_argument("--bold", action="store_true")
     s.add_argument("--align", choices=["left", "center", "right"], default="left")
