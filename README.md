@@ -5,6 +5,8 @@ printer over BLE and exposes the operations the Android app does, as a
 headless CLI. Companion to `PROTOCOL.md` (the reverse-engineered protocol
 reference).
 
+![A photo of a LuckJingle printer printing out an LLM-generated haiku with this tool](/photo.jpg)
+
 ## Setup
 
 Requires Python ≥ 3.10 and [uv](https://docs.astral.sh/uv/) (or any PEP 621
