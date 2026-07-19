@@ -79,6 +79,16 @@ def binarise(img: Image.Image, dither: Dither = "floyd", threshold: int = 128) -
     raise ValueError(f"unknown dither mode: {dither!r}")
 
 
+def to_width_bilevel(img: Image.Image, width: int) -> Image.Image:
+    """Scale to `width` in grayscale, then threshold to mode "1" without dithering.
+
+    Resizing must happen before binarising: PIL forces NEAREST resampling on
+    mode-"1" images, which aliases thin features (barcode bars, QR modules).
+    """
+    gray = to_width(img.convert("L"), width)
+    return gray.point(lambda v: 255 if v >= 128 else 0).convert("1", dither=Image.Dither.NONE)
+
+
 def stack_images_vertical(images: Iterable[Image.Image]) -> Image.Image:
     """Stack images of equal width vertically into one tall image (mode "1")."""
     images = [im.convert("1") for im in images]
@@ -98,40 +108,53 @@ def stack_images_vertical(images: Iterable[Image.Image]) -> Image.Image:
 # image_to_raster — the shared final step (matches PrinterImageProcessor)
 # ---------------------------------------------------------------------------
 
+_INVERT_TABLE = bytes(b ^ 0xFF for b in range(256))
+
+
 def image_to_raster(img: Image.Image) -> tuple[bytes, int, int]:
     """Convert a PIL Image to (pixel_bytes, bytes_per_row, height_px) for GS v 0.
 
     Mirrors com.luckprinter.sdk_new.device.normal.base.PrinterImageProcessor.
     getBitmapByteArray: 1 bit per pixel, MSB-first, 1 = black, row-padded
     to a byte boundary.
+
+    Mode "1" `tobytes()` already produces MSB-first bytes with rows padded to
+    a byte boundary, just with 1 = white — so the payload is the inverted
+    buffer with the padding bits of each row's last byte masked back to 0.
     """
     img = img.convert("1")
     width, height = img.width, img.height
-    pixels = img.load()
-    assert pixels is not None  # PIL stubs type load() as Optional; img owns it.
     bytes_per_row = (width + 7) // 8
-    out = bytearray(bytes_per_row * height)
-    for row in range(height):
-        base = row * bytes_per_row
-        for col_byte in range(bytes_per_row):
-            byte = 0
-            for bit in range(8):
-                x = col_byte * 8 + bit
-                if x < width:
-                    try:
-                        v = pixels[x, row]
-                    except IndexError:
-                        v = 255
-                    # Mode "1": 0=black, 255=white. We want bit=1 for black.
-                    if v == 0:
-                        byte |= 0x80 >> bit
-            out[base + col_byte] = byte
-    return bytes(out), bytes_per_row, height
+    raw = img.tobytes().translate(_INVERT_TABLE)
+    pad_bits = bytes_per_row * 8 - width
+    if pad_bits:
+        out = bytearray(raw)
+        mask = (0xFF << pad_bits) & 0xFF
+        for i in range(bytes_per_row - 1, len(out), bytes_per_row):
+            out[i] &= mask
+        raw = bytes(out)
+    return raw, bytes_per_row, height
 
 
 # ---------------------------------------------------------------------------
 # Text rendering
 # ---------------------------------------------------------------------------
+
+def _break_long_word(word: str, fits) -> list[str]:
+    """Split a single word into chunks that each satisfy `fits`."""
+    if fits(word):
+        return [word]
+    parts: list[str] = []
+    cur = ""
+    for ch in word:
+        if cur and not fits(cur + ch):
+            parts.append(cur)
+            cur = ch
+        else:
+            cur += ch
+    parts.append(cur)
+    return parts
+
 
 def text_to_image(
     text: str,
@@ -149,22 +172,24 @@ def text_to_image(
     measure = Image.new("1", (max(width, 1), 1), color=255)
     measure_draw = ImageDraw.Draw(measure)
 
-    # Wrap each hard line at word boundaries.
+    # Wrap each hard line at word boundaries; break oversize words by character.
+    max_w = width - 2 * margin
+
+    def fits(s: str) -> bool:
+        return measure_draw.textlength(s, font=font) <= max_w
+
     lines: list[str] = []
     for hard_line in text.splitlines() or [""]:
         words = hard_line.split(" ")
-        if not words:
-            lines.append("")
-            continue
         cur = words[0]
         for w in words[1:]:
             cand = f"{cur} {w}"
-            if measure_draw.textlength(cand, font=font) <= width - 2 * margin:
+            if fits(cand):
                 cur = cand
             else:
-                lines.append(cur)
+                lines.extend(_break_long_word(cur, fits))
                 cur = w
-        lines.append(cur)
+        lines.extend(_break_long_word(cur, fits))
 
     bbox = font.getbbox("Ag")
     line_h = int(bbox[3]) + line_gap
@@ -292,8 +317,7 @@ def qr_to_image(
     qr.make(fit=True)
     # qrcode's make_image returns a PyPNGImage in stubs but a PIL.Image at runtime.
     img: Image.Image = qr.make_image(fill_color="black", back_color="white")  # type: ignore[assignment]
-    # Scale to fit the printer width.
-    return to_width(img.convert("1"), width)
+    return to_width_bilevel(img, width)
 
 
 # ---------------------------------------------------------------------------
@@ -326,8 +350,7 @@ def barcode_to_image(
     buf = io.BytesIO()
     obj.write(buf)
     buf.seek(0)
-    img = Image.open(buf).convert("1")
-    return to_width(img, width)
+    return to_width_bilevel(Image.open(buf), width)
 
 
 # ---------------------------------------------------------------------------

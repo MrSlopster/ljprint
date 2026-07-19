@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 
 from luckjingle import protocol
-from luckjingle.cli import build_parser, main, EXIT_BAD_ARG
+from luckjingle.cli import build_parser, main, matches_printer_name, EXIT_BAD_ARG
 
 
 # ---------------------------------------------------------------------------
@@ -62,7 +62,6 @@ def test_main_does_not_require_mac_for_scan(monkeypatch):
 
     # Patch the handler on the parsed args by intercepting asyncio.run.
     import asyncio
-    real_run = asyncio.run
 
     def fake_run(coro):
         # coro is a coroutine from args.handler(args); we don't actually
@@ -232,6 +231,40 @@ def test_print_text_dash_arg_passes_stdin_to_printer(monkeypatch, capsys):
     rc = main(["print", "-"])
     assert rc == 0
     assert captured.get("text") == "from stdin"
+
+
+# ---------------------------------------------------------------------------
+# --help hygiene: every argument of every subcommand carries help text
+# ---------------------------------------------------------------------------
+
+def test_every_argument_has_help_text():
+    import argparse
+    parser = build_parser()
+    sub = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    for name, sp in sub.choices.items():
+        for action in sp._actions:
+            assert action.help, f"'{name}' argument '{action.dest}' has no help text"
+
+
+# ---------------------------------------------------------------------------
+# scan: friendly-name matching (PROTOCOL.md §4)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("name", [
+    "DP_D1_BC3B",     # verified hardware
+    "LJ-D1",          # hyphen variant per PROTOCOL.md §4
+    "GT-01",          # hyphen variant per PROTOCOL.md §4
+    "LuckJingle-X",
+    "AiYin-2",
+    "lj_old",
+])
+def test_matches_printer_name_documented_prefixes(name):
+    assert matches_printer_name(name)
+
+
+@pytest.mark.parametrize("name", ["iPhone", "JBL Flip", "MX Master 3", ""])
+def test_matches_printer_name_rejects_unrelated_devices(name):
+    assert not matches_printer_name(name)
 
 
 # ---------------------------------------------------------------------------

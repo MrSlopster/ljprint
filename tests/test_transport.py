@@ -15,7 +15,7 @@ from typing import Callable
 import pytest
 
 from luckjingle import protocol
-from luckjingle.transport import PrinterTransport
+from luckjingle.transport import PrinterTransport, resolve_service_chars
 
 
 class FakeBleakClient:
@@ -313,6 +313,36 @@ def test_mtu_notification_updates_packet_size(transport_with_credit):
     assert transport._mtu_ready.is_set()
 
 
+def test_mtu_announcement_clamped_to_link_att_mtu(transport_with_credit):
+    """The printer's preferred payload must never exceed what the negotiated
+    link ATT_MTU can carry per write-without-response (ATT_MTU - 3)."""
+    transport, client = transport_with_credit
+    client.mtu_size = 100
+    transport.packet_size = 20
+    transport._mtu_ready.clear()
+
+    async def go():
+        client.simulate_notify(protocol.CREDIT_CHAR_UUID, b"\x02\xF4\x00")
+        await asyncio.sleep(0)
+        return transport.packet_size
+
+    assert asyncio.run(go()) == 97
+
+
+def test_credit_starvation_raises_actionable_error(transport_with_credit, monkeypatch):
+    """A credit timeout must surface as a RuntimeError with a hint, not a
+    bare TimeoutError whose str() is empty."""
+    monkeypatch.setattr("luckjingle.transport.CREDIT_TIMEOUT_S", 0.05)
+    transport, _ = transport_with_credit
+    transport._credit = 0
+
+    async def go():
+        await transport.send(protocol.cmd_enable_printer(3))
+
+    with pytest.raises(RuntimeError, match="credit"):
+        asyncio.run(go())
+
+
 # ---------------------------------------------------------------------------
 # start_notify failure cleanup (#3)
 # ---------------------------------------------------------------------------
@@ -342,6 +372,87 @@ def test_start_notify_failure_triggers_disconnect():
     with pytest.raises(RuntimeError, match="simulated"):
         asyncio.run(go())
     assert fake_client.connected is False, "client was not disconnected after start_notify failure"
+
+
+# ---------------------------------------------------------------------------
+# Characteristic resolution (PROTOCOL.md §1.1: clones may shift UUID suffixes)
+# ---------------------------------------------------------------------------
+
+class _FakeChar:
+    def __init__(self, uuid: str, properties: list[str]):
+        self.uuid = uuid
+        self.properties = properties
+
+
+class _FakeService:
+    def __init__(self, uuid: str, characteristics: list[_FakeChar]):
+        self.uuid = uuid
+        self.characteristics = characteristics
+
+
+def _uuid(minor: str) -> str:
+    return f"0000{minor}-0000-1000-8000-00805f9b34fb"
+
+
+def test_resolve_service_chars_canonical_uuids():
+    service = _FakeService(protocol.SERVICE_UUID, [
+        _FakeChar(protocol.RESPONSE_CHAR_UUID, ["notify"]),
+        _FakeChar(protocol.WRITE_CHAR_UUID, ["write", "write-without-response"]),
+        _FakeChar(protocol.CREDIT_CHAR_UUID, ["notify"]),
+    ])
+    resolved = resolve_service_chars([service])
+    assert resolved == (protocol.WRITE_CHAR_UUID,
+                        protocol.RESPONSE_CHAR_UUID,
+                        protocol.CREDIT_CHAR_UUID)
+
+
+def test_resolve_service_chars_shifted_suffixes_by_properties():
+    """A clone with ff04/ff05/ff06 characteristics must still resolve: write
+    by write-without-response, response/credit as the notify pair in
+    ascending UUID order (mirrors ff01 < ff03)."""
+    service = _FakeService(_uuid("ff00"), [
+        _FakeChar(_uuid("ff04"), ["notify"]),
+        _FakeChar(_uuid("ff05"), ["write-without-response"]),
+        _FakeChar(_uuid("ff06"), ["notify"]),
+    ])
+    resolved = resolve_service_chars([service])
+    assert resolved == (_uuid("ff05"), _uuid("ff04"), _uuid("ff06"))
+
+
+def test_resolve_service_chars_partial_shift_keeps_roles_distinct():
+    """Canonical credit char present but response shifted: the response
+    fallback must not grab the credit char (would subscribe both handlers
+    to ff03 and leave the real response channel dark)."""
+    service = _FakeService(_uuid("ff00"), [
+        _FakeChar(_uuid("ff02"), ["write-without-response"]),
+        _FakeChar(_uuid("ff03"), ["notify"]),
+        _FakeChar(_uuid("ff04"), ["notify"]),
+    ])
+    resolved = resolve_service_chars([service])
+    assert resolved == (_uuid("ff02"), _uuid("ff04"), _uuid("ff03"))
+
+
+def test_resolve_service_chars_no_matching_service():
+    service = _FakeService(_uuid("fee7"), [
+        _FakeChar(_uuid("fee8"), ["write", "notify"]),
+    ])
+    assert resolve_service_chars([service]) is None
+
+
+def test_resolve_service_chars_missing_write_char():
+    service = _FakeService(_uuid("ff00"), [
+        _FakeChar(_uuid("ff01"), ["notify"]),
+        _FakeChar(_uuid("ff03"), ["notify"]),
+    ])
+    assert resolve_service_chars([service]) is None
+
+
+def test_resolve_service_chars_missing_notify_pair():
+    service = _FakeService(_uuid("ff00"), [
+        _FakeChar(_uuid("ff02"), ["write-without-response"]),
+        _FakeChar(_uuid("ff01"), ["notify"]),
+    ])
+    assert resolve_service_chars([service]) is None
 
 
 # ---------------------------------------------------------------------------

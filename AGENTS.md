@@ -32,7 +32,7 @@ src/luckjingle/
   cli.py                    argparse dispatch (~24 subcommands)
   __main__.py               enables `python -m luckjingle`
   completions/              bash + zsh completion scripts (bundled in wheel)
-tests/                      134 tests, no real hardware required
+tests/                      156 tests, no real hardware required
 docs/superpowers/specs/     design spec (layout superseded by uv migration)
 work/                       jadx decompilation of the APK (reference)
 Luck+Jingle_2.7.16_APKPure.xapk  the original Android app
@@ -51,7 +51,7 @@ uv build                 # build sdist + wheel into dist/
 Do NOT use raw `pip`, `python -m venv`, or `.venv/bin/...` paths — go through
 `uv run`. The dev group (`pytest`) is synced by default; no `--extra` flag.
 
-The 134 tests must stay green. They never touch BLE hardware — they use
+The 156 tests must stay green. They never touch BLE hardware — they use
 `MockTransport` (in `tests/test_printer.py`) or `FakeBleakClient`
 (in `tests/test_transport.py`). If you add a hardware-dependent test, mark
 it clearly and keep it out of the default suite.

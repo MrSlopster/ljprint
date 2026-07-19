@@ -9,7 +9,7 @@ import sys
 import pytest
 from PIL import Image
 
-from luckjingle import protocol, rendering
+from luckjingle import rendering
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +47,14 @@ def test_image_to_raster_all_black():
     assert raster[0] == 0xFF
 
 
+def test_image_to_raster_padding_bits_stay_zero():
+    # 12 px all black -> per row: 0xFF, then 4 black bits + 4 padding bits.
+    img = Image.new("1", (12, 2), color=0)
+    raster, bpr, height = rendering.image_to_raster(img)
+    assert (bpr, height) == (2, 2)
+    assert raster == bytes([0xFF, 0xF0]) * 2
+
+
 # ---------------------------------------------------------------------------
 # Text rendering
 # ---------------------------------------------------------------------------
@@ -71,6 +79,14 @@ def test_text_to_image_wraps_long_lines():
     assert img.height > 32 * 5
 
 
+def test_text_to_image_breaks_unbreakable_long_word():
+    # A single word wider than the print width must wrap by character
+    # instead of overflowing past the right edge.
+    single_line = rendering.text_to_image("A", width=384, font_size=32)
+    long_word = rendering.text_to_image("A" * 300, width=384, font_size=32)
+    assert long_word.height > single_line.height * 3
+
+
 def test_text_to_image_alignment_changes_pixel_offset():
     left = rendering.text_to_image("X", width=384, font_size=40, align="left")
     right = rendering.text_to_image("X", width=384, font_size=40, align="right")
@@ -83,11 +99,11 @@ def test_text_to_image_alignment_changes_pixel_offset():
                 if pixels[x, y] == 0:
                     return x
         return None
-    l = first_black_col(left)
-    c = first_black_col(center)
-    r = first_black_col(right)
-    assert l is not None and c is not None and r is not None
-    assert l < c < r
+    lx = first_black_col(left)
+    cx = first_black_col(center)
+    rx = first_black_col(right)
+    assert lx is not None and cx is not None and rx is not None
+    assert lx < cx < rx
 
 
 def test_text_to_image_bold_uses_different_pixels_than_regular():
@@ -156,6 +172,33 @@ def test_stack_images_vertical_concatenates():
 def test_stack_images_vertical_empty_raises():
     with pytest.raises(ValueError):
         rendering.stack_images_vertical([])
+
+
+# ---------------------------------------------------------------------------
+# to_width_bilevel — resize in grayscale, threshold without dithering
+# ---------------------------------------------------------------------------
+
+def test_to_width_bilevel_thresholds_uniformly_without_dither():
+    # A uniform light-gray source must come out uniformly white. The old
+    # convert("1")-then-resize path dithered it into speckles.
+    src = Image.new("L", (100, 50), color=200)
+    out = rendering.to_width_bilevel(src, 64)
+    assert out.mode == "1"
+    assert out.width == 64
+    assert set(out.tobytes()) == {0xFF}
+
+
+def test_to_width_bilevel_preserves_solid_bar_on_downscale():
+    src = Image.new("L", (100, 20), color=255)
+    for x in range(40, 60):
+        for y in range(20):
+            src.putpixel((x, y), 0)
+    out = rendering.to_width_bilevel(src, 50)
+    assert out.size == (50, 10)
+    px = out.load()
+    assert px is not None
+    assert px[25, 5] == 0
+    assert px[5, 5] == 255
 
 
 # ---------------------------------------------------------------------------

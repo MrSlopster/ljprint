@@ -16,7 +16,7 @@ group or pre-pair the printer with `bluetoothctl pair <mac>`.
 
 ```sh
 git clone <this repo> luckjingle-print && cd luckjingle-print
-uv sync       # creates .venv, installs runtime + dev deps (PEP 735 default group)
+uv sync       # creates .venv, installs runtime + dev deps
 ```
 
 Run any command via `uv run luckjingle-print …`. The console script is also
@@ -35,7 +35,7 @@ uv run luckjingle-print print-text "hello"       # uses $LUCKJINGLE_PRINTER
 uv run luckjingle-print info 11:22:33:44:55:66   # explicit arg always wins
 ```
 
-If neither is supplied the CLI exits with code 2 and a clear hint.
+If neither is supplied the CLI exits with code 2 and a hint.
 
 ## Shell completions
 
@@ -150,18 +150,18 @@ src/luckjingle/
 ├── transport.py         BLE PrinterTransport with credit/MTU flow control.
 ├── rendering.py         text/image/pdf/qr/barcode/grid → 1-bit raster.
 ├── printer.py           High-level Printer class; one async method per op.
-├── cli.py               Argparse subcommands (~23).
+├── cli.py               Argparse subcommands.
 ├── __main__.py          Enables `python -m luckjingle`.
 └── completions/         Bundled bash + zsh completion scripts.
-tests/                   127 tests (byte-level + rendering + printer + transport + CLI).
-pyproject.toml           PEP 621 metadata, hatchling build, deps, dev extras.
+tests/                   Byte-level, rendering, printer, transport, and CLI tests.
+pyproject.toml           PEP 621 metadata, hatchling build, deps, dependency groups.
 ```
 
 ## Development
 
 ```sh
-uv sync            # install + lock runtime + dev deps (PEP 735 default-group)
-uv run pytest -v   # run the full test suite (129 tests)
+uv sync            # install + lock runtime + dev deps
+uv run pytest -q   # run the full test suite
 uv run pytest tests/test_transport.py::test_concurrent_exchanges_get_distinct_replies -v
 uv build           # build sdist + wheel into dist/
 ```

@@ -29,6 +29,10 @@ COMPLETION_FILES = {
     "zsh":  "_luckjingle_print",
 }
 
+# Friendly-name prefixes for scan matching (PROTOCOL.md §4). Separators vary
+# across device variants (DP_D1_BC3B vs LJ-D1 vs GT-01), so match without one.
+PRINTER_NAME_PREFIXES = ("dp", "lj", "luck", "gt", "ay", "aiyin", "hanyin", "print")
+
 # Exit codes
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -49,6 +53,13 @@ def _add_print_common(p: argparse.ArgumentParser) -> None:
                    help="Print even if pre-flight status check fails")
 
 
+def _add_dither_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--dither", choices=["floyd", "threshold", "none"], default="floyd",
+                   help="Binarisation algorithm (default: floyd)")
+    p.add_argument("--threshold", type=int, default=128,
+                   help="Luminance cutoff for --dither threshold/none (default: 128)")
+
+
 def _mac_arg(p: argparse.ArgumentParser) -> None:
     """Add a `mac` positional that falls back to $LUCKJINGLE_PRINTER.
 
@@ -67,6 +78,16 @@ def _mac_arg(p: argparse.ArgumentParser) -> None:
 # Subcommand handlers
 # ---------------------------------------------------------------------------
 
+def matches_printer_name(name: str) -> bool:
+    """True when a BLE friendly name matches a known printer-family prefix.
+
+    `LJ-*` and `GT-*` use hyphens while `DP_*` uses underscores, so the
+    prefixes omit the separator and match either form.
+    """
+    lowered = name.lower()
+    return any(lowered.startswith(p) for p in PRINTER_NAME_PREFIXES)
+
+
 async def cmd_scan(args) -> int:
     print(f"Scanning for {args.duration:.0f}s ...\n")
     seen: dict[str, tuple] = {}
@@ -77,15 +98,13 @@ async def cmd_scan(args) -> int:
     async with BleakScanner(detection_callback=cb):
         await asyncio.sleep(args.duration)
 
-    name_prefixes = ("dp_", "lj_", "luck", "gt_", "ay_", "aiyin", "hanyin", "print")
     matches, others = [], []
     for addr, (dev, adv) in seen.items():
         uuids = list(adv.service_uuids or [])
         name = dev.name or getattr(adv, "local_name", None) or ""
         is_luck = any(u.lower().startswith("0000ff00") for u in uuids)
-        name_match = any(name.lower().startswith(p) for p in name_prefixes)
         row = (addr, name or None, uuids, adv.rssi)
-        (matches if (is_luck or name_match) else others).append(row)
+        (matches if (is_luck or matches_printer_name(name)) else others).append(row)
 
     if matches:
         print("LuckJingle printers found:")
@@ -133,7 +152,8 @@ async def cmd_watch(args) -> int:
             while True:
                 status = await p.get_status()
                 battery = await p.get_battery()
-                print(f"  status={status}  battery={battery}%")
+                battery_s = f"{battery}%" if battery is not None else "?"
+                print(f"  status={status}  battery={battery_s}")
                 await asyncio.sleep(args.interval)
         except asyncio.CancelledError:
             pass
@@ -237,7 +257,7 @@ async def _run_setting(args, method_name: str, value_arg: str | None = None) -> 
             await method()
         else:
             await method(getattr(args, value_arg))
-    print(f"OK")
+    print("OK")
     return EXIT_OK
 
 
@@ -298,12 +318,13 @@ def build_parser() -> argparse.ArgumentParser:
         description="LuckJingle thermal printer BLE utility (see PROTOCOL.md).",
     )
     p.add_argument("-v", "--verbose", action="count", default=0,
-                   help="-v=INFO, -vv=DEBUG")
+                   help="Increase logging: -v INFO, -vv DEBUG")
     sub = p.add_subparsers(dest="command", required=True, metavar="<command>")
 
     # ---- utility ----
     s = sub.add_parser("scan", help="Scan for nearby LuckJingle printers.")
-    s.add_argument("--duration", type=float, default=10.0)
+    s.add_argument("--duration", type=float, default=10.0,
+                   help="Scan duration in seconds (default: 10)")
     s.set_defaults(handler=cmd_scan)
 
     s = sub.add_parser("gatt-map", help="Dump the full GATT layout of a device.")
@@ -316,7 +337,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(handler=cmd_raw)
 
     # ---- queries ----
-    s = sub.add_parser("info", help="Combined snapshot: status, battery, model, fw, sn.")
+    s = sub.add_parser("info", help="Combined snapshot: status, battery, model, firmware, serial.")
     _mac_arg(s)
     s.set_defaults(handler=cmd_info)
 
@@ -324,38 +345,34 @@ def build_parser() -> argparse.ArgumentParser:
     _mac_arg(s)
     s.set_defaults(handler=cmd_status)
 
-    s = sub.add_parser("watch", help="Continuously poll + stream async events.")
+    s = sub.add_parser("watch", help="Poll status and stream async printer events.")
     _mac_arg(s)
-    s.add_argument("--interval", type=float, default=5.0)
+    s.add_argument("--interval", type=float, default=5.0,
+                   help="Seconds between status polls (default: 5)")
     s.set_defaults(handler=cmd_watch)
 
     # ---- print ----
     _text_help = ('Text to print, or "-" to read from stdin '
                   '(e.g. `fortune | luckjingle-print print -`)')
-    s = sub.add_parser("print-text", help="Render text and print it.")
-    _mac_arg(s)
-    s.add_argument("text", help=_text_help)
-    s.add_argument("--font-size", type=int, default=32)
-    s.add_argument("--bold", action="store_true")
-    s.add_argument("--align", choices=["left", "center", "right"], default="left")
-    _add_print_common(s)
-    s.set_defaults(handler=cmd_print_text)
-
-    # Backward-compat alias: `print` was the original name (single-file demo).
-    s = sub.add_parser("print", help="Alias for print-text.")
-    _mac_arg(s)
-    s.add_argument("text", help=_text_help)
-    s.add_argument("--font-size", type=int, default=32)
-    s.add_argument("--bold", action="store_true")
-    s.add_argument("--align", choices=["left", "center", "right"], default="left")
-    _add_print_common(s)
-    s.set_defaults(handler=cmd_print_text)
+    # `print` is a backward-compat alias: it was the original name
+    # (single-file demo) and must keep the exact same flags.
+    for name, help_text in (("print-text", "Render text and print it."),
+                            ("print", "Alias for print-text.")):
+        s = sub.add_parser(name, help=help_text)
+        _mac_arg(s)
+        s.add_argument("text", help=_text_help)
+        s.add_argument("--font-size", type=int, default=32,
+                       help="Font size in pixels (default: 32)")
+        s.add_argument("--bold", action="store_true", help="Render with the bold font")
+        s.add_argument("--align", choices=["left", "center", "right"], default="left",
+                       help="Text alignment (default: left)")
+        _add_print_common(s)
+        s.set_defaults(handler=cmd_print_text)
 
     s = sub.add_parser("print-image", help="Print a PNG/JPG image file.")
     _mac_arg(s)
     s.add_argument("file", help="Path to image file")
-    s.add_argument("--dither", choices=["floyd", "threshold", "none"], default="floyd")
-    s.add_argument("--threshold", type=int, default=128)
+    _add_dither_args(s)
     _add_print_common(s)
     s.set_defaults(handler=cmd_print_image)
 
@@ -363,15 +380,15 @@ def build_parser() -> argparse.ArgumentParser:
     _mac_arg(s)
     s.add_argument("file", help="Path to PDF file")
     s.add_argument("--pages", default=None, help="Page range, e.g. '1,3,5-7' (default: all)")
-    s.add_argument("--dither", choices=["floyd", "threshold", "none"], default="floyd")
-    s.add_argument("--threshold", type=int, default=128)
+    _add_dither_args(s)
     _add_print_common(s)
     s.set_defaults(handler=cmd_print_pdf)
 
     s = sub.add_parser("print-qr", help="Generate a QR code and print it.")
     _mac_arg(s)
     s.add_argument("data", help="Data to encode")
-    s.add_argument("--box-size", type=int, default=None)
+    s.add_argument("--box-size", type=int, default=None,
+                   help="QR module size in pixels before scaling (default: 10)")
     _add_print_common(s)
     s.set_defaults(handler=cmd_print_qr)
 
@@ -384,36 +401,46 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("print-grid", help="Generate and print ruled/grid paper.")
     _mac_arg(s)
-    s.add_argument("--style", choices=["grid", "ruled", "lined"], default="grid")
-    s.add_argument("--rows", type=int, default=20)
-    s.add_argument("--cols", type=int, default=8)
-    s.add_argument("--line-spacing", type=int, default=32)
+    s.add_argument("--style", choices=["grid", "ruled", "lined"], default="grid",
+                   help="Template style (default: grid)")
+    s.add_argument("--rows", type=int, default=20, help="Number of rows (default: 20)")
+    s.add_argument("--cols", type=int, default=8,
+                   help="Number of columns, grid style only (default: 8)")
+    s.add_argument("--line-spacing", type=int, default=32,
+                   help="Row spacing in pixels, ruled/lined styles (default: 32)")
     _add_print_common(s)
     s.set_defaults(handler=cmd_print_grid)
 
     # ---- settings ----
     s = sub.add_parser("set-density", help="Set print density.")
-    _mac_arg(s); s.add_argument("level", type=int)
+    _mac_arg(s)
+    s.add_argument("level", type=int, help="Density level (0-2 typical)")
     s.set_defaults(handler=cmd_set_density)
 
     s = sub.add_parser("set-speed", help="Set print speed.")
-    _mac_arg(s); s.add_argument("speed", type=int)
+    _mac_arg(s)
+    s.add_argument("speed", type=int, help="Speed value")
     s.set_defaults(handler=cmd_set_speed)
 
-    s = sub.add_parser("set-paper-type", help="Set paper type (1F 80 kind mask).")
-    _mac_arg(s); s.add_argument("kind", type=int); s.add_argument("mask", type=int)
+    s = sub.add_parser("set-paper-type", help="Set raw paper type (see PROTOCOL.md §3.2).")
+    _mac_arg(s)
+    s.add_argument("kind", type=int, help="Paper-type kind byte (e.g. 1)")
+    s.add_argument("mask", type=int, help="Paper-type mask byte (e.g. 64 = tattoo)")
     s.set_defaults(handler=cmd_set_paper_type)
 
-    s = sub.add_parser("set-heating", help="Set heating level (1F 70 01 n).")
-    _mac_arg(s); s.add_argument("level", type=int)
+    s = sub.add_parser("set-heating", help="Set heating level.")
+    _mac_arg(s)
+    s.add_argument("level", type=int, help="Heating level")
     s.set_defaults(handler=cmd_set_heating)
 
-    s = sub.add_parser("set-shuttime", help="Set auto-shutdown timer (minutes).")
-    _mac_arg(s); s.add_argument("minutes", type=int)
+    s = sub.add_parser("set-shuttime", help="Set auto-shutdown timer.")
+    _mac_arg(s)
+    s.add_argument("minutes", type=int, help="Minutes until auto-shutdown")
     s.set_defaults(handler=cmd_set_shuttime)
 
-    s = sub.add_parser("set-width", help="Set print width in pixels.")
-    _mac_arg(s); s.add_argument("pixels", type=int)
+    s = sub.add_parser("set-width", help="Set print width.")
+    _mac_arg(s)
+    s.add_argument("pixels", type=int, help="Print width in dots (e.g. 384 or 832)")
     s.set_defaults(handler=cmd_set_width)
 
     s = sub.add_parser("set-time", help="Sync printer RTC to system time.")
@@ -426,7 +453,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ---- completions ----
     s = sub.add_parser("completions",
-                       help="Print a bash/zsh completion script for eval or source.")
+                       help="Print a bash or zsh completion script to eval or source.")
     s.add_argument("--shell", choices=["bash", "zsh"], default=None,
                    help="Target shell (default: detect from $SHELL)")
     s.set_defaults(handler=cmd_completions)

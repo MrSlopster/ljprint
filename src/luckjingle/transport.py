@@ -21,10 +21,54 @@ LOGGER = logging.getLogger("luckjingle.transport")
 
 # Time the printer has to deliver a credit notification before we give up.
 CREDIT_TIMEOUT_S = 30.0
+# Service UUID prefix used to locate the printer service; the minor suffix of
+# the characteristic UUIDs may differ across clones (PROTOCOL.md §1.1).
+SERVICE_UUID_PREFIX = "0000ff00"
 # Time to wait for a printer reply on ff01 when one is expected.
 RESPONSE_TIMEOUT_S = 15.0
 # How long to wait for the printer's initial MTU announcement.
 MTU_ANNOUNCE_TIMEOUT_S = 10.0
+
+
+def resolve_service_chars(services) -> Optional[tuple[str, str, str]]:
+    """Locate (write, response, credit) characteristic UUIDs per PROTOCOL.md §1.1.
+
+    The service is matched by the `0000ff00` prefix. Exact canonical
+    characteristic UUIDs are preferred; clones with shifted minor suffixes
+    fall back to properties — the write role goes to the characteristic with
+    write-without-response, and the two notify characteristics map to
+    response/credit in ascending UUID order (ff01 < ff03).
+    """
+    service = next(
+        (s for s in services if s.uuid.lower().startswith(SERVICE_UUID_PREFIX)), None
+    )
+    if service is None:
+        return None
+    chars = list(service.characteristics)
+
+    def by_uuid(uuid: str):
+        return next((c for c in chars if c.uuid.lower() == uuid), None)
+
+    write = by_uuid(protocol.WRITE_CHAR_UUID)
+    if write is None:
+        write = next((c for c in chars if "write-without-response" in c.properties), None)
+    if write is None:
+        write = next((c for c in chars if "write" in c.properties), None)
+    if write is None:
+        return None
+    notifies = sorted(
+        (c for c in chars if c is not write and "notify" in c.properties),
+        key=lambda c: c.uuid.lower(),
+    )
+    response = by_uuid(protocol.RESPONSE_CHAR_UUID)
+    credit = by_uuid(protocol.CREDIT_CHAR_UUID)
+    if response is None:
+        response = next((c for c in notifies if c is not credit), None)
+    if credit is None:
+        credit = next((c for c in notifies if c is not response), None)
+    if response is None or credit is None:
+        return None
+    return write.uuid, response.uuid, credit.uuid
 
 
 @dataclass
@@ -38,6 +82,9 @@ class PrinterTransport:
 
     client: BleakClient
     packet_size: int = protocol.DEFAULT_PACKET_SIZE
+    write_uuid: str = protocol.WRITE_CHAR_UUID
+    response_uuid: str = protocol.RESPONSE_CHAR_UUID
+    credit_uuid: str = protocol.CREDIT_CHAR_UUID
     _credit: int = 0
     _credit_event: asyncio.Event = field(default_factory=asyncio.Event)
     _response_event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -61,17 +108,20 @@ class PrinterTransport:
     async def connect(cls, mac: str, *, scan_timeout: float = 20.0) -> "PrinterTransport":
         client = BleakClient(mac, timeout=scan_timeout)
         await client.connect()
-        chars = {c.uuid for s in client.services for c in s.characteristics}
-        if protocol.WRITE_CHAR_UUID not in chars or protocol.RESPONSE_CHAR_UUID not in chars:
+        resolved = resolve_service_chars(client.services)
+        if resolved is None:
             await client.disconnect()
             raise RuntimeError(
-                f"Device {mac} does not expose the LuckJingle service "
-                f"({protocol.SERVICE_UUID}). Not a LuckJingle printer?"
+                f"Device {mac} does not expose the LuckJingle printer service "
+                f"({SERVICE_UUID_PREFIX}* with write + two notify characteristics). "
+                "Not a LuckJingle printer?"
             )
-        transport = cls(client=client)
+        write_uuid, response_uuid, credit_uuid = resolved
+        transport = cls(client=client, write_uuid=write_uuid,
+                        response_uuid=response_uuid, credit_uuid=credit_uuid)
         try:
-            await client.start_notify(protocol.CREDIT_CHAR_UUID, transport._on_credit)
-            await client.start_notify(protocol.RESPONSE_CHAR_UUID, transport._on_response)
+            await client.start_notify(credit_uuid, transport._on_credit)
+            await client.start_notify(response_uuid, transport._on_response)
         except Exception:
             # start_notify can fail mid-handshake (flaky adapter, race with
             # disconnect). Don't leak the open BleakClient.
@@ -102,10 +152,19 @@ class PrinterTransport:
     def _on_credit(self, _char: BleakGATTCharacteristic, data: bytearray) -> None:
         if len(data) == 3 and data[0] == 0x02:
             mtu = data[1] | (data[2] << 8)
-            if mtu >= protocol.DEFAULT_PACKET_SIZE:
-                self.packet_size = mtu
-            LOGGER.debug("printer announced MTU payload=%d -> packet_size=%d",
-                         mtu, self.packet_size)
+            # PROTOCOL.md §1.2 says to request ATT_MTU = 3 + mtu, but bleak
+            # cannot initiate an MTU exchange — the OS negotiates on its own.
+            # Clamp to the link's actual ATT_MTU so a chunk never exceeds
+            # what write-without-response can carry (ATT_MTU - 3).
+            try:
+                link_mtu = int(getattr(self.client, "mtu_size", 0))
+            except Exception:
+                link_mtu = 0
+            usable = min(mtu, link_mtu - 3) if link_mtu > 3 else mtu
+            if usable >= protocol.DEFAULT_PACKET_SIZE:
+                self.packet_size = usable
+            LOGGER.debug("printer announced MTU payload=%d, link ATT_MTU=%d -> packet_size=%d",
+                         mtu, link_mtu, self.packet_size)
             self._mtu_ready.set()
             return
         if len(data) == 2 and data[0] == 0x01:
@@ -188,7 +247,13 @@ class PrinterTransport:
         while offset < total:
             if self._credit <= 0:
                 self._credit_event.clear()
-                await asyncio.wait_for(self._credit_event.wait(), timeout=CREDIT_TIMEOUT_S)
+                try:
+                    await asyncio.wait_for(self._credit_event.wait(), timeout=CREDIT_TIMEOUT_S)
+                except asyncio.TimeoutError:
+                    raise RuntimeError(
+                        f"printer stopped granting flow-control credits for "
+                        f"{CREDIT_TIMEOUT_S:.0f}s (asleep, off, or out of range?)"
+                    ) from None
             reserved = 1 if self._credit >= 3 else 0
             chunks_affordable = max(1, self._credit - reserved)
             chunks_needed = -(-(total - offset) // self.packet_size)
@@ -197,7 +262,7 @@ class PrinterTransport:
                 end = min(offset + self.packet_size, total)
                 packet = payload[offset:end]
                 await self.client.write_gatt_char(
-                    protocol.WRITE_CHAR_UUID, packet, response=False
+                    self.write_uuid, packet, response=False
                 )
                 self._credit -= 1
                 offset = end

@@ -52,6 +52,12 @@ Notes:
 The packet size used for chunking writes is therefore negotiated per session
 (default 20 bytes before MTU negotiation).
 
+Client note (Linux/BlueZ): the host stack negotiates ATT_MTU on its own and
+cannot be asked to re-negotiate, so step 4's "request ATT_MTU" is not
+possible there. If the negotiated ATT_MTU is smaller than the printer's
+preferred payload, clamp the per-packet payload to `ATT_MTU - 3` instead of
+using the announced value.
+
 ### 1.3 Credit-based flow control
 
 The printer pushes 2-byte notifications on `ff03` of the form
@@ -160,6 +166,10 @@ Status byte bitfield (reply to `10 FF 40`):
 | `1F 11 11 <n>`                 | Reverse feed n dots                      |
 | `FC FF 00 02 45 02 00 46`      | Set platform identifier (sent at startup)|
 | `10 FF 53 4A <flag> <YYYYH> <YYYYL> <MM> <DD> <hh> <mm> <ss>` | Set RTC |
+
+The platform identifier is sent once by the Android app at connect time, but
+it is optional: printing and all queries work without it (verified against
+`D1Y-KD` hardware; the Python CLI never sends it).
 
 ### 3.3 Print data — ESC/POS raster bit image
 

@@ -9,16 +9,13 @@ Run with:  uv run pytest tests/test_printer.py -v
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Optional, cast
+from typing import Optional, cast
 
 import pytest
 
-from luckjingle import protocol, rendering
-from luckjingle.printer import Printer, PreflightError
+from luckjingle import protocol
+from luckjingle.printer import Printer
 from luckjingle.transport import PrinterTransport  # noqa: F401  (for typing only)
-
-if TYPE_CHECKING:
-    pass
 
 
 class MockTransport:
