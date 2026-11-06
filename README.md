@@ -168,9 +168,11 @@ pytest tests/test_transport.py::test_concurrent_exchanges_get_distinct_replies -
 uv build           # build sdist + wheel into dist/
 ```
 
-Runtime deps (bleak, pillow, qrcode, python-barcode, pypdfium2, numpy) are
-installed for everyone. Dev deps (pytest) come from the `dev` dependency
-group and are synced by default — no `--extra` flag needed.
+Runtime deps (bleak, pillow, qrcode, python-barcode, numpy) are installed by
+`uv sync`. PDF rendering uses the native **poppler-utils** command line — on
+Arch this is the `poppler` package (installed on most systems by default);
+on Debian/Ubuntu it's `poppler-utils`; on macOS `brew install poppler`.
+Nothing to install via pip.
 
 ## Out of scope
 

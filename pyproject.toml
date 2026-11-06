@@ -1,6 +1,6 @@
 [project]
 name = "luckjingle-print"
-version = "0.3.0"
+version = "0.4.0"
 description = "BLE CLI for LuckJingle / DingDang thermal printers (reverse-engineered protocol)."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -28,7 +28,6 @@ dependencies = [
     "pillow>=10.0",
     "qrcode>=7.4",
     "python-barcode>=0.15",
-    "pypdfium2>=4.0",
     "numpy>=1.24",
 ]
 

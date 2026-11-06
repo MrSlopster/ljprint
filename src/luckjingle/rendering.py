@@ -5,13 +5,23 @@ Every public function returns either a PIL `Image` in mode "1"
 The Printer class feeds these through `image_to_raster()` and the `GS v 0`
 command to the transport.
 
-Optional dependencies (qrcode, python-barcode, pypdfium2, numpy) are imported
-lazily so a missing dep only fails when its specific feature is used.
+Optional dependencies:
+- `qrcode` and `python-barcode` are Python packages installed via uv/pip.
+- PDF rendering shells out to the native `poppler-utils` command line
+  (pdftoppm + pdfinfo) — on Arch this is the `poppler` package, present on
+  most systems by default. Nothing to install via pip.
+
+Missing deps raise `MissingDependencyError` at call time with an actionable
+install hint, so the CLI runs without them until the specific feature is
+invoked.
 """
 from __future__ import annotations
 
 import io
 import logging
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Iterable, Literal, Optional
 
@@ -27,7 +37,11 @@ GridStyle = Literal["grid", "ruled", "lined"]
 
 
 class MissingDependencyError(RuntimeError):
-    """Raised when an optional rendering dep is needed but not installed."""
+    """Raised when an optional rendering dep is needed but not installed.
+
+    For native (non-Python) dependencies like poppler-utils, the message
+    points to the OS package to install rather than a pip command.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +241,7 @@ def image_file_to_image(
 
 
 # ---------------------------------------------------------------------------
-# PDF rendering
+# PDF rendering (via poppler-utils: pdftoppm / pdfinfo)
 # ---------------------------------------------------------------------------
 
 def pdf_pages_to_images(
@@ -238,34 +252,112 @@ def pdf_pages_to_images(
     dither: Dither = "floyd",
     threshold: int = 128,
 ) -> list[Image.Image]:
-    """Render PDF pages to 1-bit images sized to the printer width."""
-    try:
-        import pypdfium2 as pdfium  # type: ignore
-    except ImportError as exc:
-        raise MissingDependencyError(
-            "pypdfium2 is required for PDF rendering. "
-            "Install with: pip install pypdfium2"
-        ) from exc
+    """Render PDF pages to 1-bit images sized to the printer width.
 
-    doc = pdfium.PdfDocument(str(path))
-    try:
-        total = len(doc)
-        indices = _parse_page_range(page_range, total)
-        images: list[Image.Image] = []
+    Shells out to poppler-utils (`pdftoppm` + `pdfinfo`), a native dependency
+    on Arch Linux (package `poppler`) and widely available elsewhere
+    (`poppler-utils` on Debian/Ubuntu, `brew install poppler` on macOS).
+    """
+    for tool in ("pdftoppm", "pdfinfo"):
+        if not shutil.which(tool):
+            raise MissingDependencyError(
+                f"PDF rendering requires poppler-utils ({tool!r} not on PATH). "
+                "Install it natively: "
+                "Arch: `sudo pacman -S poppler`; "
+                "Debian/Ubuntu: `sudo apt install poppler-utils`; "
+                "macOS: `brew install poppler`."
+            )
+    pdf_path = Path(path)
+    if not pdf_path.is_file():
+        raise FileNotFoundError(pdf_path)
+
+    total = _pdf_page_count(pdf_path)
+    indices = _parse_page_range(page_range, total)
+    if not indices:
+        raise ValueError(
+            f"page range {page_range!r} selects no pages of a {total}-page PDF"
+        )
+
+    # Render at 2x the printer width so downscaling keeps text crisp.
+    target_raster_width = width * 2
+    page_w_pt = _pdf_page_width_pt(pdf_path)
+    page_w_in = page_w_pt / 72.0 if page_w_pt > 0 else 8.27
+    dpi = max(72.0, min(target_raster_width / page_w_in, 600.0))
+
+    images: list[Image.Image] = []
+    with tempfile.TemporaryDirectory(prefix="luckjingle-pdf") as tmp:
+        prefix = Path(tmp) / "page"
+        first, last = indices[0] + 1, indices[-1] + 1  # pdftoppm is 1-based
+        cmd = ["pdftoppm", "-png", "-r", f"{dpi:.2f}", "-f", str(first), "-l", str(last)]
+        if first == last:
+            cmd.append("-singlefile")
+        cmd += [str(pdf_path), str(prefix)]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(
+                f"pdftoppm failed ({exc.returncode}): {exc.stderr.strip()}"
+            ) from exc
+
+        # pdftoppm only supports contiguous page ranges (-f N -l M). For a
+        # discontinuous range like "1,3" it renders everything in the span;
+        # we then pick out just the requested pages. Output filenames are
+        # prefix-N.png with document-dependent digit padding, or prefix.png
+        # with -singlefile. Scan the dir and parse page numbers to stay
+        # agnostic of the padding scheme.
+        by_page: dict[int, Path] = {}
+        for f in Path(tmp).glob(f"{prefix.name}*.png"):
+            suffix = f.stem[len(prefix.name):].lstrip("-")
+            if suffix.isdigit():
+                by_page[int(suffix)] = f
+            elif suffix == "" and first == last:
+                by_page[first] = f  # -singlefile wrote prefix.png
+
+        missing = [i + 1 for i in indices if (i + 1) not in by_page]
+        if missing:
+            raise RuntimeError(
+                f"pdftoppm did not produce requested page(s) {missing} "
+                f"(rendered span {first}-{last})"
+            )
         for i in indices:
-            page = doc[i]
-            # Render at a scale that produces at least 2x the printer width, so
-            # downscaling keeps text crisp.
-            native_w = page.get_width()
-            scale = max(2.0, (width * 2) / native_w) if native_w else 2.0
-            bitmap = page.render(scale=scale)
-            pil = bitmap.to_pil()
-            pil = to_width(pil, width)
-            images.append(binarise(pil, dither=dither, threshold=threshold))
-        return images
-    finally:
-        # pdfium.PdfDocument holds an mmap/file handle until close; explicit release.
-        doc.close()
+            img = Image.open(by_page[i + 1])
+            img = to_width(img, width)
+            images.append(binarise(img, dither=dither, threshold=threshold))
+    return images
+
+
+def _pdf_page_count(pdf_path: Path) -> int:
+    """Total page count via `pdfinfo`."""
+    result = subprocess.run(
+        ["pdfinfo", str(pdf_path)],
+        capture_output=True, text=True, check=True,
+    )
+    for line in result.stdout.splitlines():
+        if line.startswith("Pages:"):
+            return int(line.split(":", 1)[1].strip())
+    raise RuntimeError(f"could not determine page count from pdfinfo output")
+
+
+def _pdf_page_width_pt(pdf_path: Path) -> float:
+    """Width of page 1 in points (72 pt = 1 inch) via `pdfinfo -f 1 -l 1`.
+
+    Used to compute the DPI needed for the target raster width. Returns 0 if
+    the size can't be parsed (caller falls back to a default).
+    """
+    result = subprocess.run(
+        ["pdfinfo", "-f", "1", "-l", "1", str(pdf_path)],
+        capture_output=True, text=True, check=True,
+    )
+    for line in result.stdout.splitlines():
+        # Matches both "Page size:   595 x 842 pts (A4)" and the
+        # "Page    1 size:   595 x 842 pts (A4)" form for -f 1 -l 1.
+        if "size:" in line and "pts" in line and line.startswith("Page"):
+            dims = line.split("size:", 1)[1].split()
+            try:
+                return float(dims[0])
+            except (ValueError, IndexError):
+                break
+    return 0.0
 
 
 def _parse_page_range(spec: Optional[str], total: int) -> list[int]:

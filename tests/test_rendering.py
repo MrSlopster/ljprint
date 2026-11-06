@@ -306,3 +306,75 @@ def test_parse_page_range_open_ended_span():
 def test_parse_page_range_out_of_bounds_clamped():
     assert rendering._parse_page_range("8-12", 5) == []
     assert rendering._parse_page_range("1-100", 5) == [0, 1, 2, 3, 4]
+
+
+# ---------------------------------------------------------------------------
+# PDF rendering (poppler-backed)
+# ---------------------------------------------------------------------------
+
+def _make_test_pdf(path, pages: int):
+    """Write a simple N-page PDF using Pillow (no extra test deps)."""
+    imgs = [Image.new("L", (200, 100), color=255 * (i % 2)) for i in range(pages)]
+    imgs[0].save(str(path), save_all=True, append_images=imgs[1:])
+
+
+PDF_TOOLS_AVAILABLE = all(
+    __import__("shutil").which(t) for t in ("pdftoppm", "pdfinfo")
+)
+
+
+@pytest.mark.skipif(not PDF_TOOLS_AVAILABLE, reason="poppler-utils not installed")
+def test_pdf_pages_to_images_all_pages(tmp_path):
+    pdf = tmp_path / "doc.pdf"
+    _make_test_pdf(pdf, pages=3)
+    images = rendering.pdf_pages_to_images(pdf, width=384)
+    assert len(images) == 3
+    for img in images:
+        assert img.mode == "1"
+        assert img.width == 384
+
+
+@pytest.mark.skipif(not PDF_TOOLS_AVAILABLE, reason="poppler-utils not installed")
+def test_pdf_pages_to_images_respects_page_range(tmp_path):
+    pdf = tmp_path / "doc.pdf"
+    _make_test_pdf(pdf, pages=5)
+    images = rendering.pdf_pages_to_images(pdf, width=384, page_range="2,4")
+    assert len(images) == 2
+
+
+@pytest.mark.skipif(not PDF_TOOLS_AVAILABLE, reason="poppler-utils not installed")
+def test_pdf_pages_to_images_span_range(tmp_path):
+    pdf = tmp_path / "doc.pdf"
+    _make_test_pdf(pdf, pages=6)
+    images = rendering.pdf_pages_to_images(pdf, width=384, page_range="3-5")
+    assert len(images) == 3
+
+
+@pytest.mark.skipif(not PDF_TOOLS_AVAILABLE, reason="poppler-utils not installed")
+def test_pdf_pages_to_images_empty_range_raises(tmp_path):
+    pdf = tmp_path / "doc.pdf"
+    _make_test_pdf(pdf, pages=2)
+    with pytest.raises(ValueError, match="selects no pages"):
+        rendering.pdf_pages_to_images(pdf, width=384, page_range="5-10")
+
+
+def test_pdf_pages_to_images_missing_file_raises(tmp_path):
+    if not PDF_TOOLS_AVAILABLE:
+        pytest.skip("poppler-utils not installed")
+    with pytest.raises(FileNotFoundError):
+        rendering.pdf_pages_to_images(tmp_path / "nope.pdf", width=384)
+
+
+def test_pdf_missing_poppler_raises(monkeypatch):
+    """Simulate poppler-utils not being on PATH and verify the error message
+    mentions the OS package."""
+    import shutil as real_shutil
+
+    def fake_which(name, *a, **kw):
+        return None  # simulate neither pdftoppm nor pdfinfo being found
+
+    monkeypatch.setattr(rendering.shutil, "which", fake_which)
+    with pytest.raises(rendering.MissingDependencyError) as exc:
+        rendering.pdf_pages_to_images("whatever.pdf", width=384)
+    assert "poppler" in str(exc.value)
+    assert "pdftoppm" in str(exc.value)
